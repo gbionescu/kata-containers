@@ -13,6 +13,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -97,6 +98,7 @@ var fcKernelParams = append(commonVirtioblkKernelRootParams, []Param{
 	{"iommu", "off"},
 	{"net.ifnames", "0"},
 	{"random.trust_cpu", "on"},
+	{"asd12zzz", "xyz"},
 
 	// Firecracker doesn't support ACPI
 	// Fix kernel error "ACPI BIOS Error (bug)"
@@ -270,6 +272,19 @@ func (fc *firecracker) newFireClient(ctx context.Context) *client.Firecracker {
 		},
 	}
 
+	count := 10
+	for {
+		if _, err := os.Stat(fc.socketPath); err == nil {
+			break;
+		}
+		time.Sleep(1 * time.Second)
+		count -= 1;
+
+		if count == 0 {
+			katatrace.Trace(ctx, fc.Logger(), "NO SOCKET!!!!!!!!!!!!!!!!!!!!!!!!!", fcTracingTags, map[string]string{"sandbox_id": fc.id})
+		}
+	}
+
 	transport := httptransport.New(client.DefaultHost, client.DefaultBasePath, client.DefaultSchemes)
 	transport.SetLogger(fc.Logger())
 	transport.SetDebug(fc.Logger().Logger.Level == logrus.DebugLevel)
@@ -394,13 +409,15 @@ func (fc *firecracker) fcInit(ctx context.Context, timeout int) error {
 		if fc.netNSPath != "" {
 			args = append(args, "--netns", fc.netNSPath)
 		}
-		args = append(args, "--", "--config-file", fc.fcConfigPath)
+		//args = append(args, "--", "--config-file", fc.fcConfigPath)
 
 		cmd = exec.Command(fc.config.JailerPath, args...)
 	} else {
-		args = append(args,
-			"--api-sock", fc.socketPath,
-			"--config-file", fc.fcConfigPath)
+		// args = append(args,
+		// 	"--api-sock", fc.socketPath,
+		// 	"--config-file", fc.fcConfigPath)
+			args = append(args,
+				"--api-sock", fc.socketPath)
 		cmd = exec.Command(fc.config.HypervisorPath, args...)
 	}
 
@@ -421,6 +438,46 @@ func (fc *firecracker) fcInit(ctx context.Context, timeout int) error {
 	fc.info.PID = cmd.Process.Pid
 	fc.firecrackerd = cmd
 	fc.connection = fc.newFireClient(ctx)
+
+	mempath, err := fc.fcJailResource("/run/vc/firecracker/snaps/asd.disk", "ppp.disk")
+	if err != nil {
+		return err
+	}
+
+	diskpath, err := fc.fcJailResource("/run/vc/firecracker/snaps/asd.mem", "ppp.mem")
+	if err != nil {
+		return err
+	}
+
+	_, err = fc.fcJailResource("/run/vc/firecracker/snaps/asd.rootfs", "rootfs")
+	if err != nil {
+		return err
+	}
+
+	params := ops.NewLoadSnapshotParamsWithContext(ctx)
+	params.SetBody(
+		&models.SnapshotLoadParams{
+			EnableDiffSnapshots: true,
+			MemFilePath: &diskpath,
+			SnapshotPath: &mempath,
+		},
+	)
+	_, err = fc.connection.Operations.LoadSnapshot(params)
+	if err != nil {
+		return err
+	}
+
+	patchParams := ops.NewPatchVMParamsWithContext(ctx)
+	state := "Resumed"
+	patchParams.SetBody(
+		&models.VM{
+			State: &state,
+		},
+	)
+	_, err = fc.connection.Operations.PatchVM(patchParams)
+	if err != nil {
+		return err
+	}
 
 	if err := fc.waitVMMRunning(ctx, timeout); err != nil {
 		fc.Logger().WithField("fcInit failed:", err).Debug()
@@ -509,7 +566,63 @@ func (fc *firecracker) fcJailResource(src, dst string) (string, error) {
 			src, dst)
 	}
 	jailedLocation := filepath.Join(fc.jailerRoot, dst)
+	if _, err := os.Stat(jailedLocation); err == nil {
+		var cmd *exec.Cmd
+
+		cmd = exec.Command("umount", jailedLocation)
+		cmd.Start()
+	}
 	if err := bindMount(context.Background(), src, jailedLocation, false, "slave"); err != nil {
+		fc.Logger().WithField("bindMount failed", err).Error()
+		return "", err
+	}
+
+	if !fc.jailed {
+		return jailedLocation, nil
+	}
+
+	// This is the path within the jailed root
+	absPath := filepath.Join("/", dst)
+	return absPath, nil
+}
+
+func copyFileContents(src, dst string) (err error) {
+    in, err := os.Open(src)
+    if err != nil {
+        return
+    }
+    defer in.Close()
+    out, err := os.Create(dst)
+    if err != nil {
+        return
+    }
+    defer func() {
+        cerr := out.Close()
+        if err == nil {
+            err = cerr
+        }
+    }()
+    if _, err = io.Copy(out, in); err != nil {
+        return
+    }
+    err = out.Sync()
+    return
+}
+
+func (fc *firecracker) fcCopyResource(src, dst string) (string, error) {
+	if src == "" || dst == "" {
+		return "", fmt.Errorf("fcJailResource: invalid jail locations: src:%v, dst:%v",
+			src, dst)
+	}
+	jailedLocation := filepath.Join(fc.jailerRoot, dst)
+	if _, err := os.Stat(jailedLocation); err == nil {
+		var cmd *exec.Cmd
+
+		cmd = exec.Command("umount", jailedLocation)
+		cmd.Start()
+	}
+
+	if err := copyFileContents(src, jailedLocation); err != nil {
 		fc.Logger().WithField("bindMount failed", err).Error()
 		return "", err
 	}

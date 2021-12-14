@@ -68,8 +68,9 @@ impl Handle {
         // target link. filter using name or family is supported, but
         // we cannot use that to find target link.
         // let's try if hardware address filter works. -_-
-        let link = self.find_link(LinkFilter::Address(&iface.hwAddr)).await?;
+        println!("{}", LinkFilter::Address(&iface.hwAddr));
 
+        let link = self.find_link(LinkFilter::Name(&iface.name)).await?;
         // Bring down interface if it is UP
         if link.is_up() {
             self.enable_link(link.index(), false).await?;
@@ -171,18 +172,18 @@ impl Handle {
 
         let mut stream = filtered.execute();
 
-        let next = if let LinkFilter::Address(addr) = filter {
+        let next = if let LinkFilter::Name(name) = filter {
             use packet::link::nlas::Nla;
 
-            let mac_addr = parse_mac_address(addr)
-                .with_context(|| format!("Failed to parse MAC address: {}", addr))?;
+            // let mac_addr = parse_mac_address(addr)
+            //     .with_context(|| format!("Failed to parse MAC address: {}", addr))?;
 
             // Hardware filter might not be supported by netlink,
             // we may have to dump link list and the find the target link.
             stream
                 .try_filter(|f| {
                     let result = f.nlas.iter().any(|n| match n {
-                        Nla::Address(data) => data.eq(&mac_addr),
+                        Nla::IfName(data) => data.eq(&name),
                         _ => false,
                     });
 
@@ -195,7 +196,7 @@ impl Handle {
         };
 
         next.map(|msg| msg.into())
-            .ok_or_else(|| anyhow!("Link not found ({})", filter))
+            .ok_or_else(|| anyhow!("Linkz not found ({})", filter))
     }
 
     async fn list_links(&self) -> Result<Vec<Link>> {

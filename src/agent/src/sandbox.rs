@@ -44,6 +44,8 @@ pub struct Sandbox {
     pub container_mounts: HashMap<String, Vec<String>>,
     pub uevent_map: HashMap<String, Uevent>,
     pub uevent_watchers: Vec<Option<UeventWatcher>>,
+
+    pub sandbox_up: bool,
     pub shared_utsns: Namespace,
     pub shared_ipcns: Namespace,
     pub sandbox_pidns: Option<Namespace>,
@@ -76,6 +78,7 @@ impl Sandbox {
             container_mounts: HashMap::new(),
             uevent_map: HashMap::new(),
             uevent_watchers: Vec::new(),
+            sandbox_up: false,
             shared_utsns: Namespace::new(&logger),
             shared_ipcns: Namespace::new(&logger),
             sandbox_pidns: None,
